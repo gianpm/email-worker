@@ -1,0 +1,10 @@
+services:
+  email-worker:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    stop_grace_period: 60s
