@@ -62,6 +62,16 @@ Se `SMTP_USER` não for um endereço de e-mail, preencha também `SMTP_FROM` com
 
 ## Deploy no Coolify
 
+### Docker Compose
+
+1. Crie uma **Application** a partir deste repositório Git e selecione **Build Pack: Docker Compose**.
+2. Use `/` como **Base Directory** e `/compose.yaml` como **Docker Compose Location**.
+3. Em **Domains**, selecione o serviço `email-worker` e configure o domínio com a porta interna, por exemplo `https://email-api.example.com:8000`. O proxy recebe as chamadas públicas em `https://email-api.example.com` e encaminha para a porta `8000` do container.
+4. Adicione `API_TOKEN` em **Environment Variables** como variável de runtime. Adicione `SMTP_*` se quiser um perfil SMTP padrão. O Coolify gera o `.env` usado pelo serviço.
+5. Faça **Deploy** e verifique `https://email-api.example.com/health`. O container usa o `HEALTHCHECK` do Dockerfile.
+
+### Dockerfile
+
 1. Crie uma **Application** a partir deste repositório Git.
 2. Selecione **Build Pack: Dockerfile**.
 3. Use a raiz do projeto como **Base Directory** e `/Dockerfile` como **Dockerfile Location**.
@@ -69,6 +79,8 @@ Se `SMTP_USER` não for um endereço de e-mail, preencha também `SMTP_FROM` com
 5. Adicione `API_TOKEN` como variável de runtime. Adicione as variáveis `SMTP_*` somente se quiser um perfil padrão. Marque token e senhas como secretos quando essa opção estiver disponível.
 6. Faça **Deploy**.
 7. Se habilitar o Healthcheck do Coolify, use `GET /health`, porta `8000`, status esperado `200`. A imagem já inclui um `HEALTHCHECK` equivalente.
+
+### Requisitos de rede
 
 O servidor precisa permitir saída TCP para os hosts SMTP na porta 465. Configure o proxy para aceitar pelo menos **8 MiB** de corpo e um timeout de pelo menos **60 segundos**. Não é necessário publicar a porta 8000 diretamente no host ao usar o proxy do Coolify.
 
@@ -79,15 +91,10 @@ Depois de atualizar o código ou as variáveis, faça um novo deploy para aplica
 Copie `.env.example` para `.env` e preencha `API_TOKEN`. As linhas opcionais de SMTP estão comentadas; descomente e preencha apenas se quiser um perfil padrão. O arquivo `.env` é ignorado pelo Git e pelo build Docker.
 
 ```sh
-docker compose up -d --build
-docker compose logs -f
+docker compose run --rm --build --publish 127.0.0.1:8000:8000 email-worker
 ```
 
-A API estará em `http://localhost:8000`. O Compose publica a porta apenas em `127.0.0.1` para desenvolvimento local. Em produção, use um domínio HTTPS e o proxy da hospedagem.
-
-```sh
-docker compose down
-```
+A opção `--publish` torna a API acessível em `http://localhost:8000` durante esse teste local. Pressione `Ctrl+C` para encerrar o container.
 
 Sem Compose:
 
@@ -413,5 +420,6 @@ Os testes não enviam e-mails reais. Simulam o transporte SMTP e verificam inici
 ## Referências
 
 - [Dockerfile no Coolify](https://coolify.io/docs/applications/builds/dockerfile)
+- [Docker Compose no Coolify](https://coolify.io/docs/applications/builds/docker-compose)
 - [FastAPI em containers](https://fastapi.tiangolo.com/deployment/docker/)
 - [Arquivos binários no Code node do n8n](https://docs.n8n.io/code/cookbook/code-node/get-binary-data-buffer/)
