@@ -41,6 +41,36 @@ A aplicacao recusa iniciar se faltar uma variavel obrigatoria. `/health` verific
 O servidor/VPS precisa permitir conexoes de saida para `smtp.example.com:465`.
 Configure o proxy com limite de corpo de pelo menos 8 MiB e timeout de pelo menos 60 segundos.
 
+## SMTP personalizado por request
+
+O objeto `smtp` e opcional. Quando omitido ou `null`, o envio usa as variaveis `SMTP_*` do container. A configuracao padrao do container continua obrigatoria para iniciar a aplicacao.
+
+Quando `smtp` estiver presente, envie `host`, `user` e `password` completos: os campos nao sao combinados com as credenciais padrao. `port` pode ser omitido e assume `465`. `from` pode ser omitido quando `user` for um e-mail; nesse caso, o remetente sera o proprio `user` da request, sem herdar `SMTP_FROM` do container.
+
+```json
+{
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 465,
+    "user": "financeiro@example.com",
+    "password": "SENHA_DESSA_CONTA",
+    "from": "financeiro@example.com"
+  },
+  "para": "destinatario@example.com",
+  "assunto": "Documentos em anexo",
+  "texto": "Seguem os documentos.",
+  "attachments": [
+    {"filename": "teste.txt", "contentType": "text/plain", "base64": "T2xhIQ=="}
+  ]
+}
+```
+
+O Bearer token continua obrigatorio para todos os envios. Somente a porta **465 com TLS direto** e aceita; a porta 587 e STARTTLS nao estao implementados. O certificado do SMTP e validado contra o hostname informado. Os campos `smtp.user` e `smtp.password` devem usar caracteres ASCII, conforme o suporte de autenticacao de `smtplib.login`; caracteres nao suportados retornam HTTP 400 antes da conexao. Texto e nomes de anexos continuam aceitando acentos.
+
+Hosts SMTP fornecidos por request devem resolver apenas para enderecos publicos. Destinos locais, privados, link-local e multicast sao rejeitados antes da conexao; a conexao usa o IP validado, preservando o hostname para TLS. A configuracao `SMTP_HOST` do container e considerada confiavel e pode apontar para um servidor interno quando isso for necessario ao deploy.
+
+Envie credenciais por HTTPS. A API nao registra o corpo das requests nem devolve as senhas nas respostas. Configure tambem o n8n e o proxy para nao armazenar corpos de requests com senhas em historicos ou logs. As configuracoes de uma request nao alteram os envios seguintes.
+
 ## Request do n8n
 
 - HTTP Request: `POST https://SEU-DOMINIO/enviar-email`.
@@ -93,6 +123,7 @@ for (let i = 0; i < items.length; i++) {
       para: item.json.para,
       assunto: item.json.assunto || 'Documentos em anexo',
       texto: item.json.texto || 'Ola! Seguem os documentos.',
+      ...(item.json.smtp ? { smtp: item.json.smtp } : {}),
       attachments,
     },
     pairedItem: { item: i },
@@ -157,7 +188,7 @@ python -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Os testes simulam somente o transporte SMTP: exercitam a API HTTP, token, validacao, MIME real e preservacao dos bytes. Nao enviam e-mails.
+Os testes simulam o transporte SMTP: exercitam a API HTTP, token, configuracao por request, isolamento das credenciais, validacao, MIME real e preservacao dos bytes. Tambem verificam o bloqueio de destinos internos e a conexao ao IP validado com o hostname original no TLS. Nao enviam e-mails.
 
 Referencias: https://coolify.io/docs/applications/builds/dockerfile e https://fastapi.tiangolo.com/deployment/docker/
 

@@ -11,7 +11,7 @@ RUN python -m pip install -r requirements.txt \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 
-COPY --chown=app:app app.py ./
+COPY --chown=app:app app.py smtp_transport.py ./
 USER app
 EXPOSE 8000
 

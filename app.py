@@ -3,19 +3,22 @@
 import base64
 import binascii
 import hmac
+import ipaddress
 import logging
 import os
 import re
 import smtplib
 import ssl
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
+
+from smtp_transport import PublicSMTP_SSL, SMTPDestinationError
 
 MAX_BODY = 8 * 1024 * 1024
 MAX_ATTACHMENTS = 5 * 1024 * 1024
@@ -29,7 +32,7 @@ class Settings:
     host: str
     port: int
     user: str
-    password: str
+    password: str = field(repr=False)
     sender: str
 
     @classmethod
@@ -69,12 +72,64 @@ class Attachment(BaseModel):
         return value
 
 
+class SMTPConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(default=465, ge=465, le=465)
+    user: str = Field(min_length=1, max_length=320)
+    password: SecretStr = Field(min_length=1, max_length=4096)
+    sender: str | None = Field(default=None, alias='from', max_length=254)
+
+    @field_validator('host')
+    @classmethod
+    def host_valid(cls, value):
+        if value != value.strip() or '%' in value:
+            raise ValueError('Host SMTP invalido')
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass
+        try:
+            hostname = value.removesuffix('.').encode('idna').decode('ascii').lower()
+        except UnicodeError:
+            raise ValueError('Host SMTP invalido') from None
+        labels = hostname.split('.')
+        if len(labels) < 2 or len(hostname) > 253 or any(
+            not re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?', label)
+            for label in labels
+        ):
+            raise ValueError('Informe o hostname SMTP ou um IP publico, sem URL ou porta')
+        return hostname
+
+    @field_validator('user')
+    @classmethod
+    def user_valid(cls, value):
+        if not value.isascii() or not value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError('Usuario SMTP invalido')
+        return value
+
+    @field_validator('password')
+    @classmethod
+    def password_valid(cls, value):
+        if not value.get_secret_value().isascii():
+            raise ValueError('A senha SMTP deve conter somente caracteres ASCII nesta versao')
+        return value
+
+    @model_validator(mode='after')
+    def sender_valid(self):
+        self.sender = self.user if self.sender is None else self.sender
+        if not EMAIL.fullmatch(self.sender):
+            raise ValueError('Informe smtp.from como e-mail valido quando smtp.user nao for um e-mail')
+        return self
+
+
 class EmailRequest(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     para: str = Field(max_length=254)
     assunto: str = Field(min_length=1, max_length=150)
     texto: str = Field(max_length=100000)
     attachments: list[Attachment] = Field(default_factory=list, max_length=10)
+    smtp: SMTPConfig | None = None
     _files: list[bytes] = PrivateAttr(default_factory=list)
 
     @field_validator('para')
@@ -109,6 +164,10 @@ class EmailRequest(BaseModel):
 
 
 def send_email(settings: Settings, payload: EmailRequest):
+    custom = payload.smtp
+    if custom is not None:
+        settings = replace(settings, host=custom.host, port=custom.port, user=custom.user,
+                           password=custom.password.get_secret_value(), sender=custom.sender)
     message = EmailMessage()
     message['From'] = settings.sender
     message['To'] = payload.para
@@ -120,7 +179,8 @@ def send_email(settings: Settings, payload: EmailRequest):
         maintype, subtype = attachment.contentType.split('/', 1)
         message.add_attachment(raw, maintype=maintype, subtype=subtype, filename=attachment.filename)
 
-    smtp = smtplib.SMTP_SSL(settings.host, settings.port, context=ssl.create_default_context(), timeout=25)
+    transport = PublicSMTP_SSL if custom is not None else smtplib.SMTP_SSL
+    smtp = transport(settings.host, settings.port, context=ssl.create_default_context(), timeout=25)
     try:
         smtp.login(settings.user, settings.password)
         refused = smtp.send_message(message, from_addr=settings.sender, to_addrs=[payload.para])
@@ -184,6 +244,8 @@ async def email_endpoint(request: Request):
         raise HTTPException(400, errors) from None
     try:
         return await run_in_threadpool(send_email, settings, payload)
+    except SMTPDestinationError as error:
+        raise HTTPException(400, str(error)) from None
     except TimeoutError:
         raise HTTPException(504, 'Timeout SMTP; confirme a entrega antes de reenviar') from None
     except (smtplib.SMTPException, OSError) as error:

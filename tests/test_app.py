@@ -3,6 +3,7 @@ import os
 import smtplib
 import ssl
 import unittest
+from smtplib import SMTP_SSL as StdlibSMTP_SSL
 from email import policy
 from email.parser import BytesParser
 from unittest.mock import patch
@@ -111,6 +112,100 @@ class EmailApiTests(unittest.TestCase):
     def test_refused_recipient_is_not_reported_as_success(self):
         self.smtp.send_message.return_value = {'recipient@example.com': (550, b'rejected')}
         self.assertEqual(self.post().status_code, 502)
+
+    def test_custom_smtp_uses_request_credentials_and_preserves_attachment(self):
+        custom = {'host': 'mail.other.example', 'user': 'smtp-login', 'password': 'request-only-secret',
+                  'from': 'billing@other.example', 'port': 465}
+        binary = bytes([0, 255, 128, 10])
+        payload = {**self.payload, 'smtp': custom, 'attachments': [{
+            'filename': 'documento.bin', 'base64': base64.b64encode(binary).decode(),
+        }]}
+        with patch('app.PublicSMTP_SSL') as transport:
+            transport.return_value.send_message.return_value = {}
+            result = self.post(payload)
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(transport.call_args.args, ('mail.other.example', 465))
+            context = transport.call_args.kwargs['context']
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
+            transport.return_value.login.assert_called_once_with('smtp-login', 'request-only-secret')
+            msg = transport.return_value.send_message.call_args.args[0]
+            self.assertEqual(str(msg['From']), 'billing@other.example')
+            parsed = BytesParser(policy=policy.default).parsebytes(msg.as_bytes())
+            self.assertEqual(next(parsed.iter_attachments()).get_payload(decode=True), binary)
+            self.assertNotIn('request-only-secret', result.text)
+        self.smtp_class.assert_not_called()
+
+    def test_custom_sender_defaults_to_request_user_without_affecting_defaults(self):
+        custom = {'host': 'mail.other.example', 'user': 'account@other.example', 'password': 'custom-secret'}
+        with patch('app.PublicSMTP_SSL') as transport:
+            transport.return_value.send_message.return_value = {}
+            self.assertEqual(self.post({**self.payload, 'smtp': custom}).status_code, 200)
+            msg = transport.return_value.send_message.call_args.args[0]
+            self.assertEqual(str(msg['From']), 'account@other.example')
+        self.assertEqual(self.post().status_code, 200)
+        self.smtp.login.assert_called_once_with('sender@example.com', 'test-only-password')
+        self.assertEqual(str(self.smtp.send_message.call_args.args[0]['From']), 'sender@example.com')
+
+    def test_custom_smtp_requires_complete_valid_config_and_only_port_465(self):
+        custom = {'host': 'mail.other.example', 'user': 'sender@other.example', 'password': 'request-secret'}
+        invalid = [
+            {'host': 'mail.other.example'},
+            {**custom, 'password': ''},
+            {**custom, 'port': 587},
+            {**custom, 'port': '465'},
+            {**custom, 'host': 'https://mail.other.example'},
+            {**custom, 'host': 'mail.other.example\r\nX: y'},
+            {**custom, 'from': 'a@example.com\nBcc: b@example.com'},
+            {**custom, 'user': 'login-id'},
+        ]
+        for config in invalid:
+            with self.subTest(config_keys=list(config)):
+                result = self.post({**self.payload, 'smtp': config})
+                self.assertEqual(result.status_code, 400)
+                self.assertNotIn('request-secret', result.text)
+        self.smtp_class.assert_not_called()
+
+    def test_custom_smtp_still_requires_bearer_token(self):
+        result = self.client.post('/enviar-email', json={**self.payload, 'smtp': {
+            'host': 'mail.other.example', 'user': 'user@other.example', 'password': 'secret',
+        }})
+        self.assertEqual(result.status_code, 401)
+        self.smtp_class.assert_not_called()
+
+    def test_blocked_custom_destination_returns_400(self):
+        from smtp_transport import SMTPDestinationError
+        with patch('app.PublicSMTP_SSL', side_effect=SMTPDestinationError('Host SMTP deve ser publico')):
+            result = self.post({**self.payload, 'smtp': {
+                'host': 'localhost.example', 'user': 'a@example.com', 'password': 'secret',
+            }})
+        self.assertEqual(result.status_code, 400)
+
+    def test_custom_smtp_auth_failure_does_not_leak_request_credentials(self):
+        with patch('app.PublicSMTP_SSL') as transport:
+            transport.return_value.login.side_effect = smtplib.SMTPAuthenticationError(535, b'rejected')
+            result = self.post({**self.payload, 'smtp': {
+                'host': 'mail.other.example', 'user': 'a@example.com', 'password': 'request-only-secret',
+            }})
+        self.assertEqual(result.status_code, 502)
+        self.assertNotIn('request-only-secret', result.text)
+
+    def test_non_ascii_custom_credentials_are_rejected_before_connect(self):
+        # Real stdlib AUTH PLAIN encoding fails before any network I/O.
+        client = StdlibSMTP_SSL(local_hostname='client.example')
+        client.ehlo_resp = b'ok'
+        client.esmtp_features = {'auth': 'PLAIN'}
+        with self.assertRaises(UnicodeEncodeError):
+            client.login('user', 'senha-\u00e9')
+        custom = {'host': 'mail.other.example', 'user': 'a@other.example',
+                  'password': 'ascii-secret', 'from': 'a@other.example'}
+        for changes in ({'password': 'senha-\u00e9'}, {'user': 'usu\u00e1rio'}):
+            with self.subTest(fields=list(changes)), patch('app.PublicSMTP_SSL') as transport:
+                transport.return_value.send_message.return_value = {}
+                result = self.post({**self.payload, 'smtp': {**custom, **changes}})
+                self.assertEqual(result.status_code, 400)
+                self.assertNotIn('senha-\u00e9', result.text)
+                transport.assert_not_called()
 
 
 if __name__ == '__main__':
