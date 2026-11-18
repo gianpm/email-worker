@@ -26,6 +26,10 @@ EMAIL = re.compile(r"[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9.-
 logger = logging.getLogger('email-worker')
 
 
+class SMTPConfigurationError(ValueError):
+    """The request needs a complete SMTP profile before an email can be sent."""
+
+
 @dataclass(frozen=True)
 class Settings:
     token: str
@@ -37,18 +41,15 @@ class Settings:
 
     @classmethod
     def load(cls):
-        required = ('API_TOKEN', 'SMTP_HOST', 'SMTP_USER', 'SMTP_PASSWORD')
-        missing = [key for key in required if not os.environ.get(key)]
-        if missing:
-            raise RuntimeError('Configure as variaveis: ' + ', '.join(missing))
-        port = int(os.environ.get('SMTP_PORT', '465'))
+        if not os.environ.get('API_TOKEN'):
+            raise RuntimeError('Configure a variavel obrigatoria API_TOKEN')
+        port = int(os.environ.get('SMTP_PORT') or '465')
         if port != 465:
             raise RuntimeError('Esta API usa SMTP SSL/TLS implicito; SMTP_PORT deve ser 465')
-        sender = os.environ.get('SMTP_FROM') or os.environ['SMTP_USER']
-        if not EMAIL.fullmatch(sender):
-            raise RuntimeError('SMTP_FROM deve ser um endereco de e-mail simples')
-        return cls(os.environ['API_TOKEN'], os.environ['SMTP_HOST'], port,
-                   os.environ['SMTP_USER'], os.environ['SMTP_PASSWORD'], sender)
+        user = os.environ.get('SMTP_USER') or ''
+        sender = os.environ.get('SMTP_FROM') or user
+        return cls(os.environ['API_TOKEN'], os.environ.get('SMTP_HOST') or '', port,
+                   user, os.environ.get('SMTP_PASSWORD') or '', sender)
 
 
 class Attachment(BaseModel):
@@ -168,6 +169,15 @@ def send_email(settings: Settings, payload: EmailRequest):
     if custom is not None:
         settings = replace(settings, host=custom.host, port=custom.port, user=custom.user,
                            password=custom.password.get_secret_value(), sender=custom.sender)
+    else:
+        if not settings.host or not settings.user or not settings.password:
+            raise SMTPConfigurationError(
+                'Informe o objeto smtp na request ou configure os defaults SMTP_HOST, SMTP_USER e SMTP_PASSWORD'
+            )
+        if not EMAIL.fullmatch(settings.sender):
+            raise SMTPConfigurationError('Configure SMTP_FROM como e-mail valido para o remetente padrao')
+        if not settings.user.isascii() or not settings.password.isascii():
+            raise SMTPConfigurationError('SMTP_USER e SMTP_PASSWORD devem conter somente caracteres ASCII nesta versao')
     message = EmailMessage()
     message['From'] = settings.sender
     message['To'] = payload.para
@@ -244,7 +254,7 @@ async def email_endpoint(request: Request):
         raise HTTPException(400, errors) from None
     try:
         return await run_in_threadpool(send_email, settings, payload)
-    except SMTPDestinationError as error:
+    except (SMTPDestinationError, SMTPConfigurationError) as error:
         raise HTTPException(400, str(error)) from None
     except TimeoutError:
         raise HTTPException(504, 'Timeout SMTP; confirme a entrega antes de reenviar') from None

@@ -1,31 +1,51 @@
 # email-worker
 
-Python + FastAPI. SMTP SSL/TLS na porta 465, com validacao do certificado.
-O envio e a montagem de anexos usam a biblioteca padrao do Python.
+API HTTP para envio de e-mails por SMTP com TLS na porta **465**. Python + FastAPI, com `smtplib` e `email` da biblioteca padrão para autenticação SMTP, montagem MIME e anexos.
 
-## Variaveis de ambiente
+**Somente `API_TOKEN` é obrigatório no deploy.** O SMTP pode ser informado em cada request ou configurado como um perfil padrão opcional no container.
 
-Configure os valores em runtime; nunca inclua credenciais no Dockerfile, em build arguments ou no repositorio.
+## Funcionalidades e escopo
 
-| Variavel | Obrigatoria | Valor recomendado / descricao |
+- Um destinatário por request, com autenticação Bearer.
+- Corpo em texto simples UTF-8 e anexos opcionais de qualquer formato.
+- SMTP personalizado por request, sem alterar a configuração de outros envios.
+- TLS direto na porta 465, com validação do certificado.
+- Dockerfile, Docker Compose e endpoint de saúde para Coolify.
+
+**Não há suporte a corpo HTML nesta versão.** O campo `html` é desconhecido e retorna HTTP 400. Se enviar tags HTML dentro de `texto`, elas serão enviadas como texto literal, sem renderizar o design. Não há suporte a STARTTLS/587, CC/BCC, múltiplos destinatários, arquivos por URL, imagens inline/CID, fila persistente ou deduplicação.
+
+## Deploy mínimo
+
+Configure apenas:
+
+```dotenv
+API_TOKEN=SUBSTITUA_POR_UM_TOKEN_ALEATORIO
+```
+
+Gere um token com:
+
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+O token deve ser mantido em segredo. Recomenda-se gerar pelo menos 32 bytes aleatórios. Não existe token padrão: sem `API_TOKEN`, a aplicação recusa iniciar.
+
+Nesse modo, informe um objeto `smtp` completo em cada envio. `/health` funciona sem configuração SMTP.
+
+## Variáveis de ambiente
+
+Todas são variáveis de **runtime**. Não coloque senhas no Dockerfile, em argumentos de build ou no repositório.
+
+| Variável | Obrigatória no deploy | Descrição |
 |---|---|---|
-| `API_TOKEN` | Sim | Token aleatorio com pelo menos 32 bytes, compartilhado com o cliente HTTP |
-| `SMTP_HOST` | Sim | Hostname real do servidor SMTP, por exemplo `smtp.example.com` |
-| `SMTP_PORT` | Nao | `465`; esta versao aceita apenas TLS implicito nessa porta |
-| `SMTP_USER` | Sim | Usuario SMTP, geralmente o endereco de e-mail completo |
-| `SMTP_PASSWORD` | Sim | Senha SMTP ou senha de aplicativo fornecida pelo provedor |
-| `SMTP_FROM` | Nao | Remetente autorizado pelo provedor; usa `SMTP_USER` quando omitido |
+| `API_TOKEN` | **Sim** | Token compartilhado com os clientes HTTP |
+| `SMTP_HOST` | Não | Hostname do SMTP padrão, como `smtp.example.com` |
+| `SMTP_PORT` | Não | Porta padrão: `465`; vazio também assume `465`; outros valores não são suportados |
+| `SMTP_USER` | Não | Usuário do SMTP padrão |
+| `SMTP_PASSWORD` | Não | Senha SMTP ou senha de aplicativo do perfil padrão |
+| `SMTP_FROM` | Não | Remetente padrão; quando omitido ou vazio, usa `SMTP_USER` |
 
-A conexao valida o certificado TLS do servidor. O endpoint de envio e `POST /enviar-email` e exige `Authorization: Bearer SEU_API_TOKEN`.
-
-## Deploy no Coolify
-
-1. Coloque os arquivos deste projeto em um repositorio Git acessível.
-2. Crie uma Application com esse repositorio e selecione o build pack **Dockerfile**.
-3. Base Directory: raiz do projeto. Dockerfile Location: `/Dockerfile`. Ports Exposes: `8000`.
-4. Configure um dominio HTTPS para a aplicacao. Nao e necessario publicar a porta 8000 diretamente no host.
-5. Adicione as variaveis abaixo como variaveis de **runtime**. Nao coloque senhas no Dockerfile nem em build arguments.
-6. Faca Deploy. Se habilitar o Healthcheck do Coolify, use GET `/health`, porta `8000`, status esperado `200`.
+Para enviar sem o objeto `smtp`, configure um perfil padrão completo:
 
 ```dotenv
 API_TOKEN=SUBSTITUA_POR_UM_TOKEN_ALEATORIO
@@ -36,16 +56,162 @@ SMTP_PASSWORD=SUBSTITUA_PELA_SENHA_SMTP
 SMTP_FROM=noreply@example.com
 ```
 
-Gere um token com `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-A aplicacao recusa iniciar se faltar uma variavel obrigatoria. `/health` verifica o processo HTTP; nao envia e-mail nem testa o SMTP.
-O servidor/VPS precisa permitir conexoes de saida para `smtp.example.com:465`.
-Configure o proxy com limite de corpo de pelo menos 8 MiB e timeout de pelo menos 60 segundos.
+Os três campos `SMTP_HOST`, `SMTP_USER` e `SMTP_PASSWORD` precisam estar preenchidos para usar o perfil padrão. Um perfil ausente ou parcial não impede a aplicação de iniciar: requests com SMTP próprio continuam funcionando. Uma request que tente usar um perfil incompleto retorna HTTP 400, antes de abrir conexão.
 
-## SMTP personalizado por request
+Se `SMTP_USER` não for um endereço de e-mail, preencha também `SMTP_FROM` com um endereço válido. Usuário e senha devem conter caracteres ASCII. Valores opcionais fornecidos ainda precisam respeitar o formato esperado: por exemplo, `SMTP_PORT=587` ou uma porta não numérica impedem a inicialização.
 
-O objeto `smtp` e opcional. Quando omitido ou `null`, o envio usa as variaveis `SMTP_*` do container. A configuracao padrao do container continua obrigatoria para iniciar a aplicacao.
+## Deploy no Coolify
 
-Quando `smtp` estiver presente, envie `host`, `user` e `password` completos: os campos nao sao combinados com as credenciais padrao. `port` pode ser omitido e assume `465`. `from` pode ser omitido quando `user` for um e-mail; nesse caso, o remetente sera o proprio `user` da request, sem herdar `SMTP_FROM` do container.
+1. Crie uma **Application** a partir deste repositório Git.
+2. Selecione **Build Pack: Dockerfile**.
+3. Use a raiz do projeto como **Base Directory** e `/Dockerfile` como **Dockerfile Location**.
+4. Configure **Ports Exposes: 8000** e associe um domínio HTTPS. O processo escuta em `0.0.0.0:8000`.
+5. Adicione `API_TOKEN` como variável de runtime. Adicione as variáveis `SMTP_*` somente se quiser um perfil padrão. Marque token e senhas como secretos quando essa opção estiver disponível.
+6. Faça **Deploy**.
+7. Se habilitar o Healthcheck do Coolify, use `GET /health`, porta `8000`, status esperado `200`. A imagem já inclui um `HEALTHCHECK` equivalente.
+
+O servidor precisa permitir saída TCP para os hosts SMTP na porta 465. Configure o proxy para aceitar pelo menos **8 MiB** de corpo e um timeout de pelo menos **60 segundos**. Não é necessário publicar a porta 8000 diretamente no host ao usar o proxy do Coolify.
+
+Depois de atualizar o código ou as variáveis, faça um novo deploy para aplicar a configuração.
+
+## Docker local
+
+Copie `.env.example` para `.env` e preencha `API_TOKEN`. As linhas opcionais de SMTP estão comentadas; descomente e preencha apenas se quiser um perfil padrão. O arquivo `.env` é ignorado pelo Git e pelo build Docker.
+
+```sh
+docker compose up -d --build
+docker compose logs -f
+```
+
+A API estará em `http://localhost:8000`. O Compose publica a porta apenas em `127.0.0.1` para desenvolvimento local. Em produção, use um domínio HTTPS e o proxy da hospedagem.
+
+```sh
+docker compose down
+```
+
+Sem Compose:
+
+```sh
+docker build -t email-worker .
+docker run --rm --env-file .env -p 127.0.0.1:8000:8000 email-worker
+```
+
+No Windows 11, Docker Desktop inclui Engine, CLI e Compose. Se a instalação do WSL solicitar reinicialização, reinicie antes de executar esses comandos.
+
+## Endpoints
+
+| Método | Caminho | Autenticação | Função |
+|---|---|---|---|
+| `GET` | `/health` | Não | Verificar o processo HTTP |
+| `POST` | `/enviar-email` | Bearer token | Enviar um e-mail |
+
+### GET /health
+
+```sh
+curl https://SEU-DOMINIO/health
+```
+
+Resposta HTTP 200:
+
+```json
+{"status":"ok"}
+```
+
+Esse endpoint não testa conectividade, credenciais SMTP ou entrega de e-mails.
+
+### POST /enviar-email: autenticação e headers
+
+```http
+Authorization: Bearer SEU_API_TOKEN
+Content-Type: application/json
+```
+
+Use exatamente `Bearer`, seguido de um espaço e do mesmo token configurado em `API_TOKEN`. Token ausente ou incorreto retorna HTTP 401 antes de processar o corpo. O token da API é independente do usuário e da senha SMTP.
+
+A API não tem usuários individuais, permissões por conta ou expiração automática do token. Para trocá-lo, altere `API_TOKEN`, faça redeploy e atualize os clientes.
+
+### Campos do JSON
+
+| Campo | Tipo | Obrigatório | Regra |
+|---|---|---|---|
+| `para` | string | Sim | Um único e-mail, até 254 caracteres; listas, nomes de exibição e destinatários separados por vírgula não são aceitos |
+| `assunto` | string | Sim | Não vazio, sem CR/LF e até 150 bytes UTF-8 |
+| `texto` | string | Sim | Corpo em texto simples, até 100.000 caracteres; pode ser vazio |
+| `attachments` | array | Não | Até 10 arquivos; omitido ou `[]` envia sem anexos; `null` não é aceito |
+| `smtp` | objeto ou null | Não | Perfil completo para esta request; omitido ou `null` usa o perfil padrão do container |
+
+Os tipos são validados estritamente e campos desconhecidos retornam HTTP 400. Por exemplo, `port: "465"` não substitui `port: 465`.
+
+### Campos de smtp
+
+| Campo | Tipo | Obrigatório dentro de smtp | Regra |
+|---|---|---|---|
+| `host` | string | Sim | Hostname ou IP público, sem `https://`, caminho ou porta; até 253 caracteres |
+| `port` | inteiro | Não | Somente `465`; assume `465` quando omitido |
+| `user` | string | Sim | Usuário SMTP, entre 1 e 320 caracteres ASCII, sem caracteres de controle |
+| `password` | string | Sim | Senha da conta ou de aplicativo, entre 1 e 4096 caracteres ASCII |
+| `from` | string | Não | Um endereço de e-mail simples, até 254 caracteres; assume `smtp.user` quando omitido ou null |
+
+Se `user` for um identificador de login em vez de um e-mail, `from` é obrigatório. O servidor SMTP também precisa autorizar esse remetente.
+
+Quando o objeto `smtp` estiver presente, seus campos **não são combinados** com os defaults do container. Por exemplo, informar apenas `smtp.host` retorna HTTP 400; não reaproveita a senha padrão para outro host. O remetente da request também não herda `SMTP_FROM`.
+
+Credenciais não ASCII retornam HTTP 400 por limitação da autenticação de `smtplib.login`. Isso não restringe acentos no corpo, no assunto ou nos nomes de anexos.
+
+### Campos de cada attachment
+
+| Campo | Tipo | Obrigatório | Regra |
+|---|---|---|---|
+| `filename` | string | Sim | Nome do arquivo, entre 1 e 180 caracteres, sem caracteres de controle |
+| `contentType` | string | Não | MIME no formato `tipo/subtipo`, até 100 caracteres; assume `application/octet-stream` |
+| `base64` | string | Sim | Bytes do arquivo codificados em Base64 puro, sem prefixo `data:` ou quebras de linha; pode representar um arquivo vazio |
+
+Exemplos de MIME:
+
+| Formato | contentType |
+|---|---|
+| PDF | `application/pdf` |
+| XML | `application/xml` |
+| DOCX | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+| XLSX | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+| DOC | `application/msword` |
+| XLS | `application/vnd.ms-excel` |
+| CSV | `text/csv` |
+| TXT | `text/plain` |
+| ZIP | `application/zip` |
+| Outros | `application/octet-stream` |
+
+A API preserva os bytes; não converte documentos nem verifica se a extensão corresponde ao conteúdo. O provedor ou o destinatário pode bloquear determinados tipos de arquivo.
+
+## Exemplo 1: sem anexos, SMTP por request
+
+Funciona com apenas `API_TOKEN` no deploy:
+
+```sh
+curl -X POST https://SEU-DOMINIO/enviar-email \
+  -H 'Authorization: Bearer SEU_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  --data '{"smtp":{"host":"smtp.example.com","user":"noreply@example.com","password":"SENHA_SMTP"},"para":"destinatario@example.com","assunto":"Teste sem anexos","texto":"Olá! Esta mensagem não possui anexos."}'
+```
+
+Corpo equivalente, formatado:
+
+```json
+{
+  "smtp": {
+    "host": "smtp.example.com",
+    "user": "noreply@example.com",
+    "password": "SENHA_SMTP"
+  },
+  "para": "destinatario@example.com",
+  "assunto": "Teste sem anexos",
+  "texto": "Olá! Esta mensagem não possui anexos."
+}
+```
+
+## Exemplo 2: múltiplos anexos, SMTP por request
+
+Envie o mesmo método, URL e headers, com o JSON:
 
 ```json
 {
@@ -53,62 +219,141 @@ Quando `smtp` estiver presente, envie `host`, `user` e `password` completos: os 
     "host": "smtp.example.com",
     "port": 465,
     "user": "financeiro@example.com",
-    "password": "SENHA_DESSA_CONTA",
+    "password": "SENHA_SMTP",
     "from": "financeiro@example.com"
   },
   "para": "destinatario@example.com",
   "assunto": "Documentos em anexo",
-  "texto": "Seguem os documentos.",
+  "texto": "Olá! Seguem os documentos.",
   "attachments": [
-    {"filename": "teste.txt", "contentType": "text/plain", "base64": "T2xhIQ=="}
+    {"filename":"mensagem.txt","contentType":"text/plain","base64":"T2xhIQ=="},
+    {"filename":"nota.xml","contentType":"application/xml","base64":"PG5vdGE+MTIzPC9ub3RhPg=="}
   ]
 }
 ```
 
-O Bearer token continua obrigatorio para todos os envios. Somente a porta **465 com TLS direto** e aceita; a porta 587 e STARTTLS nao estao implementados. O certificado do SMTP e validado contra o hostname informado. Os campos `smtp.user` e `smtp.password` devem usar caracteres ASCII, conforme o suporte de autenticacao de `smtplib.login`; caracteres nao suportados retornam HTTP 400 antes da conexao. Texto e nomes de anexos continuam aceitando acentos.
+Os arquivos do exemplo contém `Ola!` e `<nota>123</nota>`. Para PDF, DOCX, XLSX ou outros documentos reais, substitua por seus bytes codificados em Base64; não envie o caminho do arquivo no campo `base64`.
 
-Hosts SMTP fornecidos por request devem resolver apenas para enderecos publicos. Destinos locais, privados, link-local e multicast sao rejeitados antes da conexao; a conexao usa o IP validado, preservando o hostname para TLS. A configuracao `SMTP_HOST` do container e considerada confiavel e pode apontar para um servidor interno quando isso for necessario ao deploy.
+Para gerar Base64 com Python:
 
-Envie credenciais por HTTPS. A API nao registra o corpo das requests nem devolve as senhas nas respostas. Configure tambem o n8n e o proxy para nao armazenar corpos de requests com senhas em historicos ou logs. As configuracoes de uma request nao alteram os envios seguintes.
+```python
+import base64
+from pathlib import Path
 
-## Request do n8n
+conteudo = base64.b64encode(Path("documento.pdf").read_bytes()).decode("ascii")
+```
 
-- HTTP Request: `POST https://SEU-DOMINIO/enviar-email`.
-- Authentication: Generic Credential Type > Header Auth.
-- Credencial: Name `Authorization`, Value `Bearer SEU_API_TOKEN`.
-- Send Body: JSON > Using JSON. Campo em modo Expression: `{{ $json }}`.
-- Timeout sugerido: 60000 ms. Deixe Retry On Fail desativado para evitar duplicar um envio de resultado incerto.
+## Exemplo 3: usando o SMTP padrão do container
 
-Corpo:
+Exige `SMTP_HOST`, `SMTP_USER` e `SMTP_PASSWORD` configurados no deploy, além do token. Sem anexos:
 
 ```json
 {
   "para": "destinatario@example.com",
-  "assunto": "Documentos em anexo",
-  "texto": "Ola! Seguem os documentos.",
+  "assunto": "Teste com perfil padrão",
+  "texto": "Este envio usa as variáveis SMTP do container."
+}
+```
+
+Com anexo:
+
+```json
+{
+  "para": "destinatario@example.com",
+  "assunto": "Documento em anexo",
+  "texto": "Segue o documento.",
   "attachments": [
-    {
-      "filename": "teste.txt",
-      "contentType": "text/plain",
-      "base64": "T2xhIQ=="
-    }
+    {"filename":"teste.txt","contentType":"text/plain","base64":"T2xhIQ=="}
   ]
 }
 ```
 
-`attachments` e opcional. Cada request aceita um destinatario, ate 10 arquivos e ate 5 MiB de anexos decodificados no total.
-Base64 puro: sem prefixo `data:` e sem quebras de linha. JSON inteiro limitado a 8 MiB.
-Texto limitado a 100000 caracteres e assunto a 150 bytes UTF-8.
-O limite do servidor SMTP tambem se aplica. A API envia texto simples e anexos; nao aceita HTML nesta versao.
+Sem perfil padrão completo, ambos retornam HTTP 400 com orientação para informar `smtp` na request ou preencher os defaults.
 
-Code node anterior ao HTTP Request, modo **Run Once for All Items**:
+## Respostas e erros
+
+Envio aceito pelo SMTP: HTTP 200.
+
+```json
+{
+  "aceitoPeloServidor": true,
+  "para": "destinatario@example.com",
+  "messageId": "<identificador@example.com>"
+}
+```
+
+Esse resultado confirma a aceitação pelo servidor SMTP, **não a entrega na caixa de entrada**.
+
+| Status | Significado |
+|---|---|
+| `400` | JSON/campos inválidos, HTML não suportado, SMTP incompleto, defaults ausentes, porta não suportada ou destino por request bloqueado |
+| `401` | Token ausente ou incorreto |
+| `404` | Caminho inexistente |
+| `405` | Método HTTP incorreto |
+| `413` | JSON maior que 8 MiB |
+| `415` | Content-Type diferente de application/json |
+| `502` | Falha de autenticação SMTP, DNS, TLS, conectividade ou rejeição da mensagem |
+| `503` | Limite de concorrência HTTP atingido |
+| `504` | Timeout SMTP; confirme a entrega antes de repetir |
+
+Os erros de validação podem retornar `detail` como uma lista de campos e mensagens:
+
+```json
+{"detail":[{"campo":["smtp","password"],"mensagem":"Field required"}]}
+```
+
+Os erros operacionais retornam `detail` como string. Por exemplo, sem SMTP padrão nem objeto `smtp`:
+
+```json
+{"detail":"Informe o objeto smtp na request ou configure os defaults SMTP_HOST, SMTP_USER e SMTP_PASSWORD"}
+```
+
+Os status gerados pelo servidor HTTP ou proxy podem ter um corpo diferente, como texto no erro de concorrência. Use também o status HTTP para tratar falhas.
+
+A API envia durante a request, sem fila persistente ou tentativas automáticas. Um timeout pode ocorrer depois de o SMTP aceitar a mensagem; repetir automaticamente pode gerar duplicatas. Confirme a entrega antes de reenviar.
+
+## Limites
+
+| Limite | Valor |
+|---|---|
+| Destinatários | Um por request |
+| Anexos | Até 10 por request |
+| Total dos anexos originais | 5 MiB = 5.242.880 bytes |
+| Corpo JSON inteiro | 8 MiB = 8.388.608 bytes |
+| Assunto | Até 150 bytes UTF-8 |
+| Texto | Até 100.000 caracteres |
+| Concorrência HTTP do Uvicorn | Limite configurado de 20 |
+
+O tamanho dos anexos é calculado **após decodificar o Base64**, somando todos os arquivos. O Base64 aumenta o tamanho transmitido em aproximadamente um terço; os metadados e as credenciais também contam no limite do JSON. Limites do SMTP, do destinatário e do proxy também se aplicam.
+
+## Configuração no n8n
+
+No **HTTP Request**:
+
+| Campo | Valor |
+|---|---|
+| Method | `POST` |
+| URL | `https://SEU-DOMINIO/enviar-email` |
+| Authentication | Generic Credential Type → Header Auth |
+| Credencial: Name | `Authorization` |
+| Credencial: Value | `Bearer SEU_API_TOKEN` |
+| Send Body | Ativado |
+| Body Content Type | JSON |
+| Specify Body | Using JSON |
+| Campo JSON em modo Expression | `{{ $json }}` |
+| Timeout | `60000` ms |
+| Retry On Fail | Desativado |
+
+Para enviar arquivos da aba **Binary**, use antes um **Code node**, modo **Run Once for All Items**:
 
 ```javascript
 const items = $input.all();
 const saida = [];
+
 for (let i = 0; i < items.length; i++) {
   const item = items[i];
   if (!item.json.para) throw new Error(`Informe json.para no item ${i}`);
+
   const attachments = [];
   for (const [campo, arquivo] of Object.entries(item.binary ?? {})) {
     const buffer = await this.helpers.getBinaryDataBuffer(i, campo);
@@ -118,83 +363,55 @@ for (let i = 0; i < items.length; i++) {
       base64: buffer.toString('base64'),
     });
   }
+
   saida.push({
     json: {
       para: item.json.para,
       assunto: item.json.assunto || 'Documentos em anexo',
-      texto: item.json.texto || 'Ola! Seguem os documentos.',
+      texto: item.json.texto ?? 'Olá! Seguem os documentos.',
       ...(item.json.smtp ? { smtp: item.json.smtp } : {}),
       attachments,
     },
     pairedItem: { item: i },
   });
 }
+
 return saida;
 ```
 
-Cada item gera um e-mail com todos os seus arquivos binarios. Para enviar varios itens em um unico e-mail, agrupe os arquivos antes.
+Cada item gera um e-mail com todos os arquivos binários daquele item. Sem binários, gera um e-mail sem anexos. Para usar o deploy com apenas `API_TOKEN`, o JSON de entrada também precisa conter `smtp`. Se os arquivos estiverem espalhados em vários itens e você quiser um único e-mail, reúna-os antes desse nó.
 
-Retorno HTTP 200:
+## Segurança e operação
 
-```json
-{"aceitoPeloServidor": true, "para": "destinatario@example.com", "messageId": "<identificador@example.com>"}
-```
+- Use HTTPS entre o cliente e a API. O token da API e as credenciais SMTP são autenticações independentes.
+- Senhas não são devolvidas nas respostas. O código não registra corpos de requests; configure também o n8n e o proxy para não armazenar credenciais em históricos ou logs.
+- Hosts SMTP por request precisam resolver apenas para endereços públicos. Endereços privados, loopback, link-local e multicast são bloqueados; o transporte conecta ao IP validado e preserva o hostname para validar TLS.
+- `SMTP_HOST` configurado no container é confiável e pode apontar para um servidor interno, conforme as necessidades do deploy.
+- Esta versão usa um único token compartilhado, sem rate limit por cliente, expiração automática ou segregação de contas. Restrinja o acesso ao endpoint aos clientes autorizados.
+- O container roda com usuário sem root. Não é necessário persistir volumes para o funcionamento da API.
 
-O retorno indica que o SMTP aceitou a mensagem, nao confirma a entrega na caixa de entrada.
-A API envia durante a request, sem fila persistente nem deduplicacao. Um timeout pode ocorrer depois de o SMTP aceitar a mensagem; confirme antes de reenviar.
-Erros: 400 dados invalidos; 401 token invalido; 413 JSON grande; 415 Content-Type incorreto; 502 falha SMTP/TLS; 504 timeout; 503 limite de concorrencia HTTP.
+## Desenvolvimento e testes
 
-## Docker e Docker Compose
-
-Docker Desktop para Windows 11 inclui Docker Engine, CLI e Compose. Se a instalacao do WSL 2 solicitar reinicializacao, reinicie antes de executar os comandos.
-
-Copie `.env.example` para `.env`, preencha as credenciais reais e execute:
-
-```sh
-docker compose up -d --build
-docker compose logs -f
-```
-
-A API fica em `http://localhost:8000`. O Compose publica a porta apenas em `127.0.0.1` para uso local. Para parar, execute `docker compose down`.
-
-No Coolify, use o Dockerfile e o dominio HTTPS configurado na plataforma; nao e necessario publicar a porta 8000 no host.
-
-### Sem Compose
-
-Copie `.env.example` para `.env` e preencha os valores.
-
-```sh
-docker build -t email-worker .
-docker run --rm --env-file .env -p 127.0.0.1:8000:8000 email-worker
-```
-
-Teste sem anexos:
-
-```sh
-curl -X POST http://localhost:8000/enviar-email \
-  -H 'Authorization: Bearer SEU_API_TOKEN' \
-  -H 'Content-Type: application/json' \
-  --data '{"para":"destinatario@example.com","assunto":"Teste","texto":"Ola!"}'
-```
-
-## Testes
-
-Requer Python 3.14, a mesma versao utilizada na imagem Docker.
+Requer Python 3.14, também utilizado na imagem Docker.
 
 ```sh
 python -m venv .venv
-# Linux/macOS: .venv/bin/python; Windows: .venv\Scripts\python.exe
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Os testes simulam o transporte SMTP: exercitam a API HTTP, token, configuracao por request, isolamento das credenciais, validacao, MIME real e preservacao dos bytes. Tambem verificam o bloqueio de destinos internos e a conexao ao IP validado com o hostname original no TLS. Nao enviam e-mails.
-
-Referencias: https://coolify.io/docs/applications/builds/dockerfile e https://fastapi.tiangolo.com/deployment/docker/
-
-No PowerShell, use:
+No PowerShell:
 
 ```powershell
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+Os testes não enviam e-mails reais. Simulam o transporte SMTP e verificam inicialização só com token, autenticação, defaults opcionais, SMTP por request, validação de entradas, TLS, montagem MIME e integridade dos anexos.
+
+## Referências
+
+- [Dockerfile no Coolify](https://coolify.io/docs/applications/builds/dockerfile)
+- [FastAPI em containers](https://fastapi.tiangolo.com/deployment/docker/)
+- [Arquivos binários no Code node do n8n](https://docs.n8n.io/code/cookbook/code-node/get-binary-data-buffer/)

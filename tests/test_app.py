@@ -208,5 +208,73 @@ class EmailApiTests(unittest.TestCase):
                 transport.assert_not_called()
 
 
+class TokenOnlyDeploymentTests(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {
+            'API_TOKEN': 'token-only-test', 'SMTP_HOST': '', 'SMTP_PORT': '',
+            'SMTP_USER': '', 'SMTP_PASSWORD': '', 'SMTP_FROM': '',
+        })
+        self.env.start()
+        self.headers = {'Authorization': 'Bearer token-only-test'}
+        self.payload = {'para': 'recipient@example.com', 'assunto': 'Teste', 'texto': 'Texto simples'}
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_starts_with_only_api_token_and_health_is_public(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get('/health').json(), {'status': 'ok'})
+
+    def test_api_token_is_still_required_at_startup(self):
+        with patch.dict(os.environ, {'API_TOKEN': ''}), self.assertRaisesRegex(RuntimeError, 'API_TOKEN'):
+            with TestClient(app):
+                pass
+
+    def test_missing_default_smtp_returns_actionable_400_without_connecting(self):
+        with TestClient(app) as client, patch('app.smtplib.SMTP_SSL') as transport:
+            for payload in (self.payload, {**self.payload, 'smtp': None}):
+                result = client.post('/enviar-email', json=payload, headers=self.headers)
+                self.assertEqual(result.status_code, 400)
+                self.assertIn('smtp', result.json()['detail'])
+            transport.assert_not_called()
+
+    def test_missing_token_is_rejected_before_missing_smtp(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.post('/enviar-email', json=self.payload).status_code, 401)
+
+    def test_custom_smtp_with_and_without_attachments_needs_no_smtp_env(self):
+        custom = {'host': 'mail.other.example', 'user': 'sender@other.example', 'password': 'request-secret'}
+        with TestClient(app) as client, patch('app.PublicSMTP_SSL') as transport:
+            transport.return_value.send_message.return_value = {}
+            for attachments in ([], [{'filename': 'teste.txt', 'contentType': 'text/plain', 'base64': 'T2xhIQ=='}]):
+                result = client.post('/enviar-email', headers=self.headers,
+                    json={**self.payload, 'smtp': custom, 'attachments': attachments})
+                self.assertEqual(result.status_code, 200, result.text)
+                msg = transport.return_value.send_message.call_args.args[0]
+                parsed = BytesParser(policy=policy.default).parsebytes(msg.as_bytes())
+                self.assertEqual(len(list(parsed.iter_attachments())), len(attachments))
+                self.assertIsNone(parsed.get_body(preferencelist=('html',)))
+
+    def test_partial_defaults_do_not_prevent_startup(self):
+        with patch.dict(os.environ, {'SMTP_HOST': 'smtp.example.com'}), TestClient(app) as client:
+            self.assertEqual(client.get('/health').status_code, 200)
+            self.assertEqual(client.post('/enviar-email', json=self.payload, headers=self.headers).status_code, 400)
+
+    def test_invalid_default_sender_returns_400_on_send(self):
+        with patch.dict(os.environ, {'SMTP_HOST': 'smtp.example.com', 'SMTP_USER': 'smtp-login',
+                                    'SMTP_PASSWORD': 'default-secret'}), TestClient(app) as client, patch('app.smtplib.SMTP_SSL') as transport:
+            result = client.post('/enviar-email', json=self.payload, headers=self.headers)
+            self.assertEqual(result.status_code, 400)
+            self.assertIn('SMTP_FROM', result.json()['detail'])
+            transport.assert_not_called()
+
+    def test_html_body_is_explicitly_unsupported(self):
+        with TestClient(app) as client:
+            result = client.post('/enviar-email', headers=self.headers,
+                json={**self.payload, 'html': '<h1>Teste</h1>'})
+            self.assertEqual(result.status_code, 400)
+            self.assertEqual(result.json()['detail'][0]['campo'], ['html'])
+
+
 if __name__ == '__main__':
     unittest.main()
